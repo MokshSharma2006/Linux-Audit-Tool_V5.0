@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Linux Security Audit Dashboard — v5.0</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/5.0.1/chart.umd.min.js"></script>
+<style>
+  :root{--bg:#0f172a;--bg2:#1e293b;--bg3:#334155;--text:#f1f5f9;--muted:#94a3b8;
+    --green:#22c55e;--yellow:#f59e0b;--red:#ef4444;--blue:#3b82f6;--purple:#a855f7;--cyan:#06b6d4;--border:#334155;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;line-height:1.6;padding:24px}
+  h1{font-size:1.6rem;font-weight:700;margin-bottom:4px}
+  h2{font-size:1rem;font-weight:600;color:var(--muted);margin-bottom:16px}
+  h3{font-size:.85rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px}
+  .header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px;flex-wrap:wrap;gap:12px}
+  .meta{font-size:.8rem;color:var(--muted)}
+  .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:.75rem;font-weight:700}
+  .grid{display:grid;gap:16px;margin-bottom:24px}
+  .grid-4{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
+  .grid-2{grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+  .grid-3{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:18px}
+  .stat-val{font-size:2.4rem;font-weight:800;line-height:1;margin-bottom:4px}
+  .stat-label{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+  .stat-sub{font-size:.7rem;color:var(--muted);margin-top:4px}
+  .chart-wrap{position:relative;height:220px}
+  .check-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)}
+  .check-row:last-child{border:none}
+  .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+  .dot-ok{background:var(--green)} .dot-warn{background:var(--yellow)} .dot-bad{background:var(--red)}
+  .check-name{flex:1;font-size:.82rem;cursor:pointer}
+  .check-name:hover{text-decoration:underline}
+  .check-val{font-size:.78rem;color:var(--muted);text-align:right}
+  .risk-bar-wrap{height:10px;background:var(--bg3);border-radius:5px;margin-top:8px;overflow:hidden}
+  .risk-bar{height:100%;border-radius:5px;transition:width .5s}
+  .search-box{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 12px;width:100%;color:var(--text);font-size:14px;margin-bottom:16px}
+  .search-box:focus{outline:2px solid var(--blue)}
+  .fix-status{font-size:.8rem;padding:2px 8px;border-radius:4px}
+  .fix-fixed{background:var(--green);color:#000}
+  .fix-open{background:var(--red);color:#fff}
+  footer{text-align:center;color:var(--muted);font-size:.72rem;margin-top:32px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// Mock data reset to baseline/zero values
+const auditData = {
+  "hostname": "localhost",
+  "kernel": "unknown",
+  "date": new Date().toLocaleString(),
+  "duration": 0,
+  "risk_score": 0,
+  "risk_label": "Low",
+  "risk_color": "#22c55e",
+  "metrics": {
+    "open_ports": 0,
+    "suid_files": 0,
+    "world_writable": 0,
+    "failed_logins": 0,
+    "users_no_pass": 0,
+    "root_users": 0,
+    "pending_updates": 0,
+    "running_procs": 0,
+    "cpu_load": "0.00",
+    "mem_used": 0,
+    "mem_total": 0,
+    "disk_usage": 0,
+    "ufw_status": "unknown",
+    "ssh_root": "unknown",
+    "selinux": "unknown",
+    "apparmor": "unknown",
+    "sticky_tmp": "unknown"
+  },
+  "remediation": { 
+    "issues": [] 
+  }
+};
+
+const app = document.getElementById('app');
+
+function render() {
+  const { hostname, kernel, date, duration, risk_score, risk_label, risk_color, metrics, remediation } = auditData;
+  let html = `
+  <div class="header">
+    <div>
+      <h1>🛡️ Interactive Security Audit</h1>
+      <h2>${hostname} &bull; ${kernel} &bull; ${date}</h2>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:2rem;font-weight:800;color:${risk_color}">${risk_score}/100</div>
+      <span class="badge" style="background:${risk_color}22;color:${risk_color};border:1px solid ${risk_color}55">Risk: ${risk_label}</span>
+      <div class="meta" style="margin-top:6px">Duration: ${duration}s</div>
+    </div>
+  </div>
+
+  <!-- KPIs -->
+  <div class="grid grid-4">
+    <div class="card"><div class="stat-val" style="color:${metrics.open_ports > 10 ? 'var(--yellow)' : 'var(--green)'}">${metrics.open_ports}</div><div class="stat-label">Open TCP ports</div></div>
+    <div class="card"><div class="stat-val" style="color:${metrics.suid_files > 30 ? 'var(--yellow)' : 'var(--green)'}">${metrics.suid_files}</div><div class="stat-label">SUID binaries</div></div>
+    <div class="card"><div class="stat-val" style="color:${metrics.world_writable > 0 ? 'var(--red)' : 'var(--green)'}">${metrics.world_writable}</div><div class="stat-label">World-writable files</div></div>
+    <div class="card"><div class="stat-val" style="color:${metrics.failed_logins > 20 ? 'var(--red)' : 'var(--green)'}">${metrics.failed_logins}</div><div class="stat-label">Failed logins</div></div>
+    <div class="card"><div class="stat-val" style="color:${metrics.users_no_pass > 0 ? 'var(--red)' : 'var(--green)'}">${metrics.users_no_pass}</div><div class="stat-label">Users w/ empty password</div></div>
+    <div class="card"><div class="stat-val" style="color:${metrics.root_users > 1 ? 'var(--red)' : 'var(--green)'}">${metrics.root_users}</div><div class="stat-label">Root-equiv (UID 0)</div></div>
+    <div class="card"><div class="stat-val" style="color:${metrics.pending_updates > 0 ? 'var(--yellow)' : 'var(--green)'}">${metrics.pending_updates}</div><div class="stat-label">Pending sec. updates</div></div>
+    <div class="card"><div class="stat-val" style="color:var(--cyan)">${metrics.running_procs}</div><div class="stat-label">Running processes</div></div>
+  </div>
+
+  <!-- Charts -->
+  <div class="grid grid-2">
+    <div class="card"><h3>Resource usage</h3><div class="chart-wrap"><canvas id="resourceChart"></canvas></div></div>
+    <div class="card"><h3>File system risk breakdown</h3><div class="chart-wrap"><canvas id="fileRiskChart"></canvas></div></div>
+    <div class="card"><h3>Risk radar</h3><div class="chart-wrap"><canvas id="riskRadar"></canvas></div></div>
+    <div class="card"><h3>Findings severity</h3><div class="chart-wrap"><canvas id="severityChart"></canvas></div></div>
+  </div>
+
+  <!-- Remediation Status -->
+  ${remediation && remediation.issues && remediation.issues.length > 0 ? renderRemediation(remediation) : ''}
+
+  <!-- Security checklist -->
+  <div style="margin-bottom:16px">
+    <input class="search-box" type="text" id="searchInput" placeholder="🔍 Search findings..." oninput="filterChecks()">
+  </div>
+  <div id="checklistContainer" class="grid grid-3">
+    ${renderChecklist()}
+  </div>
+
+  <footer>Generated by Linux Audit Tool v5.0 &mdash; ${date} &mdash; For internal use only</footer>
+  `;
+  app.innerHTML = html;
+  initCharts();
+}
+
+function renderRemediation(rem) {
+  let html = `
+  <div class="card" style="margin-bottom:24px">
+    <h3>🔧 Remediation Status</h3>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:8px">
+  `;
+  rem.issues.forEach(issue => {
+    const cls = issue.status === 'fixed' ? 'fix-fixed' : 'fix-open';
+    const label = issue.status === 'fixed' ? '✅ Fixed' : '❌ Open';
+    html += `
+      <div style="flex:1;min-width:150px;background:var(--bg3);padding:8px 12px;border-radius:6px;">
+        <div style="font-weight:600;font-size:.8rem;">${issue.description}</div>
+        <div><span class="fix-status ${cls}">${label}</span></div>
+      </div>
+    `;
+  });
+  html += `</div></div>`;
+  return html;
+}
+
+function renderChecklist() {
+  const metrics = auditData.metrics;
+  const checks = [
+    { name: 'SSH root login', value: metrics.ssh_root, ok: metrics.ssh_root !== 'yes' },
+    { name: 'Sticky bit on /tmp', value: metrics.sticky_tmp, ok: metrics.sticky_tmp === 'set' },
+    { name: 'UID-0 accounts', value: metrics.root_users, ok: metrics.root_users <= 1 },
+    { name: 'Empty passwords', value: metrics.users_no_pass + ' accounts', ok: metrics.users_no_pass === 0 },
+    { name: 'UFW firewall', value: metrics.ufw_status, ok: metrics.ufw_status === 'active' },
+    { name: 'Open ports', value: metrics.open_ports + ' listening', ok: metrics.open_ports <= 10 },
+    { name: 'Security updates', value: metrics.pending_updates + ' pending', ok: metrics.pending_updates === 0 },
+    { name: 'SELinux', value: metrics.selinux, ok: metrics.selinux === 'enabled' },
+    { name: 'AppArmor', value: metrics.apparmor, ok: metrics.apparmor === 'loaded' },
+    { name: 'SUID binaries', value: metrics.suid_files + ' found', ok: metrics.suid_files <= 30 },
+    { name: 'World-writable files', value: metrics.world_writable + ' found', ok: metrics.world_writable === 0 },
+  ];
+  let html = '';
+  checks.forEach((c, i) => {
+    const dotClass = c.ok ? 'dot-ok' : 'dot-bad';
+    html += `
+    <div class="card check-item" data-searchable="${c.name} ${c.value}">
+      <h3 style="cursor:pointer" onclick="toggleDetails(${i})">${c.name}</h3>
+      <div class="check-row">
+        <span class="dot ${dotClass}"></span>
+        <span class="check-name">${c.value}</span>
+        <span class="check-val">${c.ok ? '✅' : '❌'}</span>
+      </div>
+      <div id="detail-${i}" style="display:none;font-size:.8rem;color:var(--muted);margin-top:8px">
+        <p>Details: ${c.ok ? 'Compliant' : 'Needs attention'} - ${c.name} is ${c.value}.</p>
+      </div>
+    </div>
+    `;
+  });
+  return html;
+}
+
+function toggleDetails(index) {
+  const el = document.getElementById('detail-' + index);
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+function filterChecks() {
+  const query = document.getElementById('searchInput').value.toLowerCase();
+  const items = document.querySelectorAll('.check-item');
+  items.forEach(item => {
+    const text = item.getAttribute('data-searchable').toLowerCase();
+    item.style.display = text.includes(query) ? '' : 'none';
+  });
+}
+
+function initCharts() {
+  const metrics = auditData.metrics;
+  const C = { green: '#22c55e', yellow: '#f59e0b', red: '#ef4444', blue: '#3b82f6', purple: '#a855f7', cyan: '#06b6d4', bg3: '#334155', text: '#94a3b8' };
+  const defaults = { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: C.text, font: { size: 11 } } } } };
+  const memPct = metrics.mem_total > 0 ? Math.round(metrics.mem_used / metrics.mem_total * 100) : 0;
+  const cpuLoad = parseFloat(metrics.cpu_load) || 0;
+
+  new Chart(document.getElementById('resourceChart'), {
+    type: 'doughnut',
+    data: {
+      labels: ['CPU load (×10)', 'Mem used %', 'Disk used %', 'Idle'],
+      datasets: [{
+        data: [Math.min(cpuLoad*10, 100), memPct, metrics.disk_usage, Math.max(0, 100 - memPct)],
+        backgroundColor: [C.purple, C.blue, C.cyan, C.bg3],
+        borderWidth: 0, hoverOffset: 4
+      }]
+    },
+    options: { ...defaults, cutout: '65%' }
+  });
+
+  new Chart(document.getElementById('fileRiskChart'), {
+    type: 'bar',
+    data: {
+      labels: ['SUID files', 'World-writable', 'Empty-pwd users', 'Root accounts', 'Failed logins ÷10'],
+      datasets: [{
+        label: 'Count',
+        data: [metrics.suid_files, metrics.world_writable, metrics.users_no_pass, metrics.root_users, Math.round(metrics.failed_logins/10)],
+        backgroundColor: [C.purple, C.red, C.red, C.yellow, C.yellow],
+        borderRadius: 6, borderWidth: 0
+      }]
+    },
+    options: { ...defaults, indexAxis: 'y', scales: { x: { ticks: { color: C.text }, grid: { color: '#334155' } }, y: { ticks: { color: C.text }, grid: { display: false } } } }
+  });
+
+  new Chart(document.getElementById('riskRadar'), {
+    type: 'radar',
+    data: {
+      labels: ['SSH','Firewall','Users','Files','MAC/SELinux','Updates'],
+      datasets: [{
+        label: 'Risk level',
+        data: [
+          metrics.ssh_root === 'yes' ? 100 : 5,
+          metrics.ufw_status === 'inactive' ? 80 : 10,
+          metrics.users_no_pass * 20 + metrics.root_users * 5,
+          metrics.world_writable * 2 + metrics.suid_files,
+          (metrics.selinux !== 'enabled' && metrics.apparmor !== 'loaded') ? 80 : 15,
+          metrics.pending_updates * 5
+        ],
+        fill: true,
+        backgroundColor: 'rgba(239,68,68,.15)',
+        borderColor: '#ef4444',
+        pointBackgroundColor: '#ef4444',
+        pointRadius: 4
+      }]
+    },
+    options: { ...defaults, scales: { r: { ticks: { color: C.text, backdropColor: 'transparent', stepSize: 25 }, grid: { color: '#334155' }, pointLabels: { color: C.text, font: { size: 11 } }, min: 0, max: 100 } } }
+  });
+
+  const critCount = (metrics.ssh_root === 'yes' ? 1 : 0) + (metrics.ufw_status === 'inactive' ? 1 : 0) + (metrics.users_no_pass > 0 ? 1 : 0);
+  const highCount = (metrics.world_writable > 0 ? 1 : 0) + (metrics.failed_logins > 50 ? 1 : 0);
+  const medCount = (metrics.suid_files > 30 ? 1 : 0) + (metrics.pending_updates > 0 ? 1 : 0);
+  const lowCount = Math.max(1, 8 - critCount - highCount - medCount);
+  new Chart(document.getElementById('severityChart'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Critical','High','Medium','Low / Info'],
+      datasets: [{ data: [critCount, highCount, medCount, lowCount], backgroundColor: [C.red, C.yellow, C.purple, C.green], borderWidth: 0, hoverOffset: 4 }]
+    },
+    options: { ...defaults, cutout: '60%' }
+  });
+}
+
+render();
+</script>
+</body>
+</html>
