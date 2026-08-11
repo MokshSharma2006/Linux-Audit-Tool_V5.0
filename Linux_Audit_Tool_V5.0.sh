@@ -11,7 +11,7 @@ echo ""
 echo "================================================================"
 echo "            L I N U X   A U D I T                               "
 echo "================================================================"
-echo " Version : 5.0 (PNG/PDF Debug)"
+echo " Version : 5.0"
 echo " Author  : Moksh Sharma"
 echo " Project : Linux-Audit-Tool"
 echo " GitHub  : https://github.com/MokshSharma2006"
@@ -71,6 +71,11 @@ CVE_REPORT_FILE="/tmp/cve_report_$$.txt"
 NETWORK_TOPOLOGY_DOT="/tmp/network_topology_$$.dot"
 NETWORK_TOPOLOGY_PNG="/tmp/network_topology_$$.png"
 REMEDIATION_STATUS_FILE="/tmp/remediation_status_$$.json"
+
+# Chart.js asset caching (see ensure_chartjs_cached below)
+ASSET_DIR="/var/lib/linux-audit/assets"
+CHARTJS_VERSION="4.5.1"   # must match a version actually published to npm/cdnjs/jsdelivr
+CHARTJS_CACHE="$ASSET_DIR/chart.umd.min.js"
 
 # ──────────────────────────────────────────────────────────────────
 # Privilege handling
@@ -269,6 +274,42 @@ auto_install_audit_tools() {
                 ;;
         esac
     done
+}
+
+# ─── Chart.js local caching ───────────────────────────────────────
+# Downloads Chart.js once and caches it so generate_interactive_html can
+# embed it directly in every report. This removes the dashboard's runtime
+# dependency on a CDN being reachable (a hardcoded, never-published
+# "5.0.1" version previously made every CDN load 404, with no offline
+# fallback at all).
+ensure_chartjs_cached() {
+    mkdir -p "$ASSET_DIR" 2>/dev/null || $SUDO mkdir -p "$ASSET_DIR" 2>/dev/null
+
+    # Already cached and looks like a real build, not a truncated/error file?
+    if [ -s "$CHARTJS_CACHE" ] && [ "$(wc -c < "$CHARTJS_CACHE" 2>/dev/null || echo 0)" -gt 50000 ]; then
+        return 0
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo -e "${YELLOW}[!] curl not available; dashboard will try to load Chart.js from a CDN when opened.${NC}"
+        return 1
+    fi
+
+    echo -e "${CYAN}[*] Caching Chart.js v${CHARTJS_VERSION} locally so dashboards work without internet...${NC}"
+    local tmp_chart="/tmp/chartjs_dl_$$.js"
+    if curl -fsSL "https://cdn.jsdelivr.net/npm/chart.js@${CHARTJS_VERSION}/dist/chart.umd.min.js" -o "$tmp_chart" 2>/dev/null \
+        || curl -fsSL "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/${CHARTJS_VERSION}/chart.umd.min.js" -o "$tmp_chart" 2>/dev/null; then
+        if [ -s "$tmp_chart" ] && [ "$(wc -c < "$tmp_chart")" -gt 50000 ]; then
+            if $SUDO cp "$tmp_chart" "$CHARTJS_CACHE" 2>/dev/null || cp "$tmp_chart" "$CHARTJS_CACHE" 2>/dev/null; then
+                rm -f "$tmp_chart"
+                echo -e "${GREEN}[+] Chart.js cached at $CHARTJS_CACHE ($(du -h "$CHARTJS_CACHE" 2>/dev/null | cut -f1))${NC}"
+                return 0
+            fi
+        fi
+    fi
+    rm -f "$tmp_chart"
+    echo -e "${YELLOW}[!] Could not cache Chart.js (no internet or download failed). Dashboard will try a CDN when opened.${NC}"
+    return 1
 }
 
 check_pdf_tools() {
@@ -637,6 +678,26 @@ Working Dir    : $(pwd)
 EOF
 }
 
+# ─── PROGRESS BAR (clean, professional) ──────────────────────────
+show_progress_bar() {
+    local current=$1
+    local total=$2
+    local label=${3:-"Processing"}
+    local width=40
+    local percent=$(( current * 100 / total ))
+    local filled=$(( percent * width / 100 ))
+    local empty=$(( width - filled ))
+    # Clear line and move to beginning
+    printf "\r\033[K"
+    printf "${CYAN}${label}${NC} ["
+    for ((i=0; i<filled; i++)); do printf "#"; done
+    for ((i=0; i<empty; i++)); do printf "."; done
+    printf "] %3d%%" $percent
+    if [ $current -eq $total ]; then
+        printf "\n"
+    fi
+}
+
 # ─── System Security Audit ──────────────────────────────────────
 system_security_audit() {
     echo -e "\n${BLUE}╔══════════════════════════════════════════════════════════════════════════════╗${NC}"
@@ -647,9 +708,56 @@ system_security_audit() {
     printf '║                           1. SYSTEM SECURITY AUDIT                            ║\n' >> "$TEMP_FILE"
     printf '╚══════════════════════════════════════════════════════════════════════════════╝\n' >> "$TEMP_FILE"
 
-    # All 1.1-1.50 checks (same as before – omitted for brevity, but they are present)
-    # In the final answer I'll include the full script with all checks.
-    # For brevity here I've kept the structure.
+    check_append "1.1"  "Current User"                "whoami; id" "Show current user and groups"
+    check_append "1.2"  "System Hostname"             "hostname -f; hostname -I" "FQDN and IP address"
+    check_append "1.3"  "Operating System"            "uname -a; cat /etc/os-release 2>/dev/null" "Detailed OS and kernel info"
+    check_append "1.4"  "System Uptime"               "uptime" "System load and uptime"
+    check_append "1.5"  "CPU Information"             "lscpu 2>/dev/null || cat /proc/cpuinfo | head -20" "CPU architecture and cores"
+    check_append "1.6"  "Memory Information"          "free -h; cat /proc/meminfo | head -15" "RAM and swap usage"
+    check_append "1.7"  "Disk Usage"                  "df -h" "Partition usage overview"
+    check_append "1.8"  "Inode Usage"                 "df -i" "Inode usage per filesystem"
+    check_append "1.9"  "Block Devices"               "lsblk -f" "Filesystem on each block device"
+    check_append "1.10" "Mount Points"                "mount | column -t" "All mounted filesystems"
+    check_append "1.11" "Filesystem Limits"           "cat /etc/fstab" "Static filesystem configuration"
+    check_append "1.12" "SUID/SGID Binaries"          "find / -perm -4000 -type f 2>/dev/null | head -50" "SetUID and SetGID files (top 50)"
+    check_append "1.13" "World Writable Files"        "find / -path /proc -prune -o -path /sys -prune -o -type f -perm -0002 -print 2>/dev/null | head -30" "World writable files (top 30)"
+    check_append "1.14" "World Writable Directories"  "find / -path /proc -prune -o -path /sys -prune -o -type d -perm -0002 -print 2>/dev/null | head -30" "World writable dirs (top 30)"
+    check_append "1.15" "Files with no owner"         "find / -nouser -o -nogroup 2>/dev/null | head -30" "Unowned files and directories"
+    check_append "1.16" "Recent modified files"       "find /etc -mtime -7 -type f 2>/dev/null | head -20" "Files modified in last 7 days (/etc)"
+    check_append "1.17" "Large files"                 "find / -type f -size +100M -exec ls -lh {} \\; 2>/dev/null | head -20" "Files larger than 100MB"
+    check_append "1.18" "All Users"                   "cat /etc/passwd; echo; cat /etc/shadow 2>/dev/null | head -20" "User accounts and shadow passwords (first 20)"
+    check_append "1.19" "Users with UID 0"            "awk -F: '$3==0{print $1}' /etc/passwd" "Root-equivalent accounts"
+    check_append "1.20" "Empty Password Users"        "awk -F: '($2==\"\" || $2==\"!!\" || $2==\"*\"){print $1}' /etc/shadow 2>/dev/null" "Accounts with no valid password"
+    check_append "1.21" "Groups"                      "cat /etc/group; echo; cat /etc/gshadow 2>/dev/null" "Group definitions"
+    check_append "1.22" "Sudoers Configuration"       "$SUDO cat /etc/sudoers; echo; ls -l /etc/sudoers.d/ 2>/dev/null" "Sudo privileges"
+    check_append "1.23" "User Crontabs"               "for u in \$(cut -f1 -d: /etc/passwd); do crontab -u \$u -l 2>/dev/null; done | head -40" "All user crontabs"
+    check_append "1.24" "System Crontabs"             "ls -l /etc/cron*; echo; cat /etc/crontab /etc/cron.d/* /etc/cron.daily/* /etc/cron.hourly/* /etc/cron.monthly/* /etc/cron.weekly/* 2>/dev/null | head -50" "System cron jobs"
+    check_append "1.25" "Running Processes"           "ps auxf --width=200 | head -50" "Process tree (top 50)"
+    check_append "1.26" "Process Memory Usage"        "ps aux --sort=-%mem | head -30" "Top memory consuming processes"
+    check_append "1.27" "Process CPU Usage"           "ps aux --sort=-%cpu | head -30" "Top CPU consuming processes"
+    check_append "1.28" "Services (systemd)"          "systemctl list-units --type=service --state=running 2>/dev/null || service --status-all 2>/dev/null" "Currently active services"
+    check_append "1.29" "Enabled Services"            "systemctl list-unit-files --type=service --state=enabled 2>/dev/null" "Services enabled at boot"
+    check_append "1.30" "Timers (systemd)"            "systemctl list-timers 2>/dev/null" "Scheduled systemd timers"
+    check_append "1.31" "Loaded Kernel Modules"       "lsmod" "Kernel modules loaded"
+    check_append "1.32" "Kernel Parameters"           "cat /proc/cmdline" "Kernel boot arguments"
+    check_append "1.33" "Sysctl Settings"             "sysctl -a 2>/dev/null | head -60" "Runtime kernel parameters (first 60)"
+    check_append "1.34" "LSM Status"                  "cat /sys/kernel/security/lsm 2>/dev/null; sestatus 2>/dev/null; aa-status 2>/dev/null | head -10" "Linux Security Module status"
+    check_append "1.35" "Auditd Status"               "$SUDO auditctl -s 2>/dev/null || echo 'auditd not running'" "Kernel audit subsystem"
+    check_append "1.36" "Audit Rules"                 "$SUDO auditctl -l 2>/dev/null || echo 'No audit rules'" "Current auditd rules"
+    check_append "1.37" "Failed Login Attempts"       "grep -i 'Failed password\\|authentication failure\\|FAILED' /var/log/auth.log /var/log/secure /var/log/audit/audit.log 2>/dev/null | tail -20" "Recent authentication failures"
+    check_append "1.38" "Successful Logins"           "last -n 20 2>/dev/null" "Recent successful logins"
+    check_append "1.39" "Who is Logged In"            "who -a; echo; w" "Currently logged in users"
+    check_append "1.40" "PAM Configuration"           "ls -l /etc/pam.d/; echo; cat /etc/pam.d/common-* 2>/dev/null | head -40" "PAM stack overview"
+    check_append "1.41" "SSH Server Configuration"    "cat /etc/ssh/sshd_config 2>/dev/null" "SSH daemon settings"
+    check_append "1.42" "SSH Client Config"           "cat /etc/ssh/ssh_config 2>/dev/null" "Global SSH client settings"
+    check_append "1.43" "Authorized Keys"             "find /root /home -name authorized_keys 2>/dev/null -exec ls -l {} \\; -exec cat {} \\; 2>/dev/null | head -20" "Authorized SSH keys"
+    check_append "1.44" "Known Hosts"                 "find /root /home -name known_hosts 2>/dev/null -exec head -20 {} \\;" "SSH known_hosts entries"
+    check_append "1.45" "Package Manager List"        "$SUDO dpkg -l 2>/dev/null | head -30 || $SUDO rpm -qa 2>/dev/null | head -30 || $SUDO pacman -Q 2>/dev/null | head -30" "Installed packages (first 30)"
+    check_append "1.46" "Pending Updates"             "$SUDO apt list --upgradable 2>/dev/null | grep -v Listing || $SUDO yum list updates 2>/dev/null || $SUDO dnf list updates 2>/dev/null || $SUDO pacman -Qu 2>/dev/null" "Upgradable packages"
+    check_append "1.47" "Security Repositories"       "grep -r 'deb\\|rpm\\|pacman' /etc/apt/sources.list /etc/apt/sources.list.d/ /etc/yum.repos.d/ /etc/pacman.conf 2>/dev/null | head -30" "Repository configuration"
+    check_append "1.48" "Log Files"                   "ls -l /var/log/; echo; tail -10 /var/log/syslog /var/log/messages /var/log/secure 2>/dev/null" "Recent log entries"
+    check_append "1.49" "Kernel Log"                  "dmesg | tail -30" "Kernel ring buffer (last 30)"
+    check_append "1.50" "Systemd Journal"             "journalctl -n 20 --no-pager 2>/dev/null" "Recent systemd journal entries"
 
     # ── Collect metrics ──
     echo -e "${CYAN}[*] Collecting security metrics for dashboard...${NC}"
@@ -694,7 +802,7 @@ system_security_audit() {
     fi
 }
 
-# ─── Network Security Audit (unchanged) ────────────────────────
+# ─── Network Security Audit ────────────────────────────────────────
 network_security_audit() {
     echo -e "\n${BLUE}╔══════════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║                          2. NETWORK SECURITY AUDIT                           ║${NC}"
@@ -728,7 +836,7 @@ network_security_audit() {
     check_append "2.22" "NetworkManager Status"      "$SUDO systemctl status NetworkManager 2>/dev/null || echo 'NetworkManager not running'" "NetworkManager service status"
 }
 
-# ─── Port Scanning (unchanged) ──────────────────────────────────
+# ─── Port Scanning ──────────────────────────────────────────────────
 port_scanning_audit() {
     echo -e "\n${BLUE}╔══════════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║                         3. PORT SCANNING ANALYSIS                            ║${NC}"
@@ -1064,7 +1172,7 @@ check_vulnerabilities() {
     printf '\n────────────────────────────────────────────────────────────────────────────\n\n' >> "$TEMP_FILE"
 }
 
-# ─── Network Topology with Debug ─────────────────────────────────
+# ─── Network Topology ─────────────────────────────────────────────
 network_topology_discovery() {
     echo -e "\n${BLUE}╔══════════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║                         NETWORK TOPOLOGY DISCOVERY                           ║${NC}"
@@ -1167,8 +1275,8 @@ network_topology_discovery() {
     printf '\n────────────────────────────────────────────────────────────────────────────\n\n' >> "$TEMP_FILE"
 }
 
+# ─── AI/ML Anomaly Detection (with progress bar) ────────────────
 run_anomaly_detection() {
-    # (same as before, unchanged)
     echo -e "\n${BLUE}╔══════════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║                         ANOMALY DETECTION (AI/ML)                            ║${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════════════════════════════════════════════╝${NC}\n"
@@ -1201,6 +1309,24 @@ EOF
 
     echo -e "${YELLOW}[*] Running anomaly detection...${NC}"
 
+    # Step 1: gather metrics
+    show_progress_bar 1 5 "Collecting current metrics"
+
+    # Step 2: check baseline
+    show_progress_bar 2 5 "Checking baseline"
+    if [ ! -f "$baseline_file" ]; then
+        $SUDO cp "$current_metrics" "$baseline_file"
+        echo -e "\n${GREEN}[+] Baseline created from current metrics.${NC}"
+        show_progress_bar 5 5 "Done"
+        rm -f "$current_metrics"
+        printf '\n────────────────────────────────────────────────────────────────────────────\n\n' >> "$TEMP_FILE"
+        echo "No baseline existed; a new one was created." >> "$TEMP_FILE"
+        echo -e "${GREEN}[+] Anomaly detection completed (baseline created).${NC}"
+        return
+    fi
+
+    # Step 3: prepare ML
+    show_progress_bar 3 5 "Preparing ML engine"
     local use_ml=0
     if command -v python3 >/dev/null 2>&1; then
         if python3 -c "import sklearn" 2>/dev/null; then
@@ -1208,9 +1334,10 @@ EOF
         fi
     fi
 
-    if [ -f "$baseline_file" ]; then
-        if [ $use_ml -eq 1 ]; then
-            python3 - <<PYEOF
+    # Step 4: run analysis
+    show_progress_bar 4 5 "Running analysis"
+    if [ $use_ml -eq 1 ]; then
+        python3 - <<PYEOF
 import json, sys, os
 import numpy as np
 from sklearn.ensemble import IsolationForest
@@ -1239,51 +1366,50 @@ result = {"anomaly_score": float(anomaly_score), "is_anomaly": bool(is_anomaly),
 with open(out_file, 'w') as f:
     json.dump(result, f)
 PYEOF
-        else
-            echo -e "${YELLOW}[!] Python ML not available; using threshold-based detection.${NC}"
-            baseline=$(cat "$baseline_file")
-            local anomalies=()
-            local metrics=(open_ports suid_files world_writable failed_logins users_no_pass root_users pending_updates running_procs)
-            local thresholds=(2 5 2 10 1 1 2 20)
-            local idx=0
-            for m in "${metrics[@]}"; do
-                base_val=$(echo "$baseline" | jq -r ".$m // 0")
-                curr_val=$(jq -r ".$m" "$current_metrics")
-                diff=$((curr_val - base_val))
-                if [ ${diff#-} -gt ${thresholds[$idx]} ]; then
-                    anomalies+=("$m: $base_val -> $curr_val")
-                fi
-                idx=$((idx+1))
-            done
-            is_anomaly="false"
-            if [ ${#anomalies[@]} -gt 0 ]; then
-                is_anomaly="true"
-                echo "Anomalies detected: ${anomalies[*]}" >> "$TEMP_FILE"
+    else
+        echo -e "${YELLOW}[!] Python ML not available; using threshold-based detection.${NC}"
+        baseline=$(cat "$baseline_file")
+        local anomalies=()
+        local metrics=(open_ports suid_files world_writable failed_logins users_no_pass root_users pending_updates running_procs)
+        local thresholds=(2 5 2 10 1 1 2 20)
+        local idx=0
+        for m in "${metrics[@]}"; do
+            base_val=$(echo "$baseline" | jq -r ".$m // 0")
+            curr_val=$(jq -r ".$m" "$current_metrics")
+            diff=$((curr_val - base_val))
+            if [ ${diff#-} -gt ${thresholds[$idx]} ]; then
+                anomalies+=("$m: $base_val -> $curr_val")
             fi
-            echo "{\"anomaly_score\": 0.5, \"is_anomaly\": $is_anomaly, \"metrics\": $(cat "$current_metrics")}" > "$ANOMALY_SCORE_FILE"
+            idx=$((idx+1))
+        done
+        is_anomaly="false"
+        if [ ${#anomalies[@]} -gt 0 ]; then
+            is_anomaly="true"
+            echo "Anomalies detected: ${anomalies[*]}" >> "$TEMP_FILE"
         fi
+        echo "{\"anomaly_score\": 0.5, \"is_anomaly\": $is_anomaly, \"metrics\": $(cat "$current_metrics")}" > "$ANOMALY_SCORE_FILE"
+    fi
 
-        if [ -f "$ANOMALY_SCORE_FILE" ]; then
-            anomaly_score=$(jq -r '.anomaly_score' "$ANOMALY_SCORE_FILE")
-            is_anomaly=$(jq -r '.is_anomaly' "$ANOMALY_SCORE_FILE")
-            echo "Anomaly Score: $anomaly_score" >> "$TEMP_FILE"
-            if [ "$is_anomaly" = "true" ]; then
-                echo -e "${RED}[!] ANOMALY DETECTED: Current metrics differ from baseline.${NC}" >> "$TEMP_FILE"
-            else
-                echo -e "${GREEN}[+] No anomalies detected.${NC}" >> "$TEMP_FILE"
-            fi
-            if [ "$is_anomaly" = "false" ]; then
-                $SUDO cp "$current_metrics" "$baseline_file"
-                echo "Baseline updated." >> "$TEMP_FILE"
-            fi
+    # Step 5: finalise
+    show_progress_bar 5 5 "Finalising"
+
+    if [ -f "$ANOMALY_SCORE_FILE" ]; then
+        anomaly_score=$(jq -r '.anomaly_score' "$ANOMALY_SCORE_FILE")
+        is_anomaly=$(jq -r '.is_anomaly' "$ANOMALY_SCORE_FILE")
+        echo "Anomaly Score: $anomaly_score" >> "$TEMP_FILE"
+        if [ "$is_anomaly" = "true" ]; then
+            echo -e "${RED}[!] ANOMALY DETECTED: Current metrics differ from baseline.${NC}" >> "$TEMP_FILE"
         else
-            echo "Anomaly detection failed." >> "$TEMP_FILE"
+            echo -e "${GREEN}[+] No anomalies detected.${NC}" >> "$TEMP_FILE"
+        fi
+        if [ "$is_anomaly" = "false" ]; then
+            $SUDO cp "$current_metrics" "$baseline_file"
+            echo "Baseline updated." >> "$TEMP_FILE"
         fi
     else
-        echo "No baseline found. Creating baseline from current metrics." >> "$TEMP_FILE"
-        $SUDO cp "$current_metrics" "$baseline_file"
-        echo "Baseline created at $baseline_file" >> "$TEMP_FILE"
+        echo "Anomaly detection failed." >> "$TEMP_FILE"
     fi
+
     rm -f "$current_metrics"
     echo -e "${GREEN}[+] Anomaly detection completed.${NC}"
     printf '\n────────────────────────────────────────────────────────────────────────────\n\n' >> "$TEMP_FILE"
@@ -1348,7 +1474,7 @@ compare_audits() {
     rm -f /tmp/audit_diff_$$.txt
 }
 
-# ─── Interactive HTML Dashboard ──────────────────────────────────
+# ─── Interactive HTML Dashboard (FIXED: dynamic Chart.js loading) ──
 generate_interactive_html() {
     local html_file="$1"
     local audit_duration=$(($(date +%s) - SCRIPT_START_TIME))
@@ -1377,6 +1503,10 @@ generate_interactive_html() {
         remediation_json=$(cat "$REMEDIATION_STATUS_FILE")
     fi
 
+    # Read anomaly data (with fallback)
+    local anomaly_score_val=$(jq -r '.anomaly_score // 0.5' "$ANOMALY_SCORE_FILE" 2>/dev/null || echo 0.5)
+    local is_anomaly_val=$(jq -r '.is_anomaly // false' "$ANOMALY_SCORE_FILE" 2>/dev/null || echo false)
+
     local json_data=$(cat <<EOF
 {
   "hostname": "$(hostname)",
@@ -1386,6 +1516,8 @@ generate_interactive_html() {
   "risk_score": $risk,
   "risk_label": "$risk_label",
   "risk_color": "$risk_color",
+  "anomaly_score": $anomaly_score_val,
+  "is_anomaly": $is_anomaly_val,
   "metrics": {
     "open_ports": $METRIC_OPEN_PORTS,
     "suid_files": $METRIC_SUID_FILES,
@@ -1417,7 +1549,6 @@ EOF
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Linux Security Audit Dashboard — v5.0</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/5.0.1/chart.umd.min.js"></script>
 <style>
   :root{--bg:#0f172a;--bg2:#1e293b;--bg3:#334155;--text:#f1f5f9;--muted:#94a3b8;
     --green:#22c55e;--yellow:#f59e0b;--red:#ef4444;--blue:#3b82f6;--purple:#a855f7;--cyan:#06b6d4;--border:#334155;}
@@ -1437,7 +1568,9 @@ EOF
   .stat-val{font-size:2.4rem;font-weight:800;line-height:1;margin-bottom:4px}
   .stat-label{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
   .stat-sub{font-size:.7rem;color:var(--muted);margin-top:4px}
-  .chart-wrap{position:relative;height:220px}
+  .chart-wrap{position:relative;width:100%;height:220px;display:flex;justify-content:center;align-items:center;}
+  canvas{display:block;max-width:100%;max-height:100%;}
+  .fallback-msg{color:var(--muted);font-size:.9rem;text-align:center;padding:10px;background:var(--bg3);border-radius:8px;}
   .check-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)}
   .check-row:last-child{border:none}
   .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
@@ -1458,12 +1591,67 @@ EOF
 <body>
 <div id="app"></div>
 <script>
+HTMLEOF
+
+    # Inline a locally-cached Chart.js build directly into the report (raw byte
+    # copy via cat -- deliberately NOT passed through a heredoc/bash variable,
+    # so nothing in the minified library's own source can be misread as shell
+    # syntax). When present, the dashboard renders charts with zero network
+    # requests. When absent (e.g. first-ever run with no internet), the loader
+    # below falls back to a CDN using a version number that actually exists.
+    if [ -s "$CHARTJS_CACHE" ]; then
+        cat "$CHARTJS_CACHE" >> "$html_file"
+        echo "" >> "$html_file"
+    fi
+
+    cat >> "$html_file" << HTMLEOF
 const auditData = $json_data;
+
+// ---- Chart.js loader ----
+// Uses the copy inlined above when present (typeof Chart check below short-
+// circuits immediately, no network at all). Otherwise fetches from a CDN.
+// NOTE: previously pinned to "5.0.1", a version that was never published to
+// npm, cdnjs, or jsdelivr -- every CDN request therefore 404'd, every time,
+// on every network, which is why charts never loaded. Pinned here to
+// $CHARTJS_VERSION, which is a real, verified-published release.
+function loadChartJS(callback) {
+  if (typeof Chart !== 'undefined') {
+    callback();
+    return;
+  }
+  function tryScript(url, onFail) {
+    var s = document.createElement('script');
+    s.src = url;
+    s.onload = function() {
+      // A 200 response doesn't guarantee real content -- some proxies/
+      // captive portals return a 200 HTML page for blocked requests -- so
+      // confirm Chart actually landed before declaring success.
+      if (typeof Chart !== 'undefined') {
+        callback();
+      } else if (onFail) {
+        onFail();
+      } else {
+        showChartLoadError();
+      }
+    };
+    s.onerror = onFail || showChartLoadError;
+    document.head.appendChild(s);
+  }
+  function showChartLoadError() {
+    document.querySelectorAll('.chart-wrap').forEach(function(el) {
+      el.innerHTML = '<div class="fallback-msg">⚠️ Chart library could not be loaded (no internet access?)</div>';
+    });
+  }
+  tryScript('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/$CHARTJS_VERSION/chart.umd.min.js', function() {
+    tryScript('https://cdn.jsdelivr.net/npm/chart.js@$CHARTJS_VERSION/dist/chart.umd.min.js', showChartLoadError);
+  });
+}
+// ---- end loader ----
 
 const app = document.getElementById('app');
 
 function render() {
-  const { hostname, kernel, date, duration, risk_score, risk_label, risk_color, metrics, remediation } = auditData;
+  const { hostname, kernel, date, duration, risk_score, risk_label, risk_color, metrics, remediation, anomaly_score, is_anomaly } = auditData;
   let html = \`
   <div class="header">
     <div>
@@ -1497,6 +1685,26 @@ function render() {
     <div class="card"><h3>Findings severity</h3><div class="chart-wrap"><canvas id="severityChart"></canvas></div></div>
   </div>
 
+  <!-- Anomaly Detection Card -->
+  <div class="card" style="margin-bottom:24px">
+    <h3>🤖 Anomaly Detection (AI/ML)</h3>
+    <div style="display:flex; flex-wrap:wrap; gap:20px; margin-top:8px">
+      <div style="flex:1; min-width:150px">
+        <div style="font-size:2.2rem; font-weight:700" id="anomalyScoreDisplay">\${Math.round(anomaly_score * 100)}%</div>
+        <div style="font-size:.8rem; color:var(--muted)">Anomaly Score</div>
+        <div style="margin-top:6px">
+          \${is_anomaly
+            ? '<span class="badge" style="background:#ef444422;color:#ef4444;border:1px solid #ef444455">⚠️ Anomaly Detected</span>'
+            : '<span class="badge" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">✅ Normal</span>'
+          }
+        </div>
+      </div>
+      <div style="flex:2; min-width:200px; height:120px">
+        <canvas id="anomalyChart"></canvas>
+      </div>
+    </div>
+  </div>
+
   <!-- Remediation Status -->
   \${remediation && remediation.issues && remediation.issues.length > 0 ? renderRemediation(remediation) : ''}
 
@@ -1511,7 +1719,8 @@ function render() {
   <footer>Generated by Linux Audit Tool v5.0 &mdash; \${date} &mdash; For internal use only</footer>
   \`;
   app.innerHTML = html;
-  initCharts();
+  // Load Chart.js and then draw charts
+  loadChartJS(initCharts);
 }
 
 function renderRemediation(rem) {
@@ -1584,75 +1793,173 @@ function filterChecks() {
 }
 
 function initCharts() {
-  const metrics = auditData.metrics;
-  const C = { green: '#22c55e', yellow: '#f59e0b', red: '#ef4444', blue: '#3b82f6', purple: '#a855f7', cyan: '#06b6d4', bg3: '#334155', text: '#94a3b8' };
-  const defaults = { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: C.text, font: { size: 11 } } } } };
-  const memPct = metrics.mem_total > 0 ? Math.round(metrics.mem_used / metrics.mem_total * 100) : 0;
-  const cpuLoad = parseFloat(metrics.cpu_load) || 0;
+  try {
+    if (typeof Chart === 'undefined') {
+      document.querySelectorAll('.chart-wrap').forEach(el => {
+        el.innerHTML = '<div class="fallback-msg">⚠️ Chart library not loaded</div>';
+      });
+      return;
+    }
 
-  new Chart(document.getElementById('resourceChart'), {
-    type: 'doughnut',
-    data: {
-      labels: ['CPU load (×10)', 'Mem used %', 'Disk used %', 'Idle'],
-      datasets: [{
-        data: [Math.min(cpuLoad*10, 100), memPct, metrics.disk_usage, Math.max(0, 100 - memPct)],
-        backgroundColor: [C.purple, C.blue, C.cyan, C.bg3],
-        borderWidth: 0, hoverOffset: 4
-      }]
-    },
-    options: { ...defaults, cutout: '65%' }
-  });
+    const metrics = auditData.metrics;
+    const C = { green: '#22c55e', yellow: '#f59e0b', red: '#ef4444', blue: '#3b82f6', purple: '#a855f7', cyan: '#06b6d4', bg3: '#334155', text: '#94a3b8' };
+    const defaults = {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: C.text, font: { size: 11 } } }
+      }
+    };
 
-  new Chart(document.getElementById('fileRiskChart'), {
-    type: 'bar',
-    data: {
-      labels: ['SUID files', 'World-writable', 'Empty-pwd users', 'Root accounts', 'Failed logins ÷10'],
-      datasets: [{
-        label: 'Count',
-        data: [metrics.suid_files, metrics.world_writable, metrics.users_no_pass, metrics.root_users, Math.round(metrics.failed_logins/10)],
-        backgroundColor: [C.purple, C.red, C.red, C.yellow, C.yellow],
-        borderRadius: 6, borderWidth: 0
-      }]
-    },
-    options: { ...defaults, indexAxis: 'y', scales: { x: { ticks: { color: C.text }, grid: { color: '#334155' } }, y: { ticks: { color: C.text }, grid: { display: false } } } }
-  });
+    function safeChart(id, config) {
+      const canvas = document.getElementById(id);
+      if (!canvas) { console.warn('Canvas #' + id + ' not found'); return null; }
+      const rect = canvas.parentElement.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) {
+        console.warn('Container for ' + id + ' has zero size, retrying...');
+        return null;
+      }
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+      canvas.style.width = rect.width + 'px';
+      canvas.style.height = rect.height + 'px';
+      try {
+        const chart = new Chart(canvas, config);
+        chart.resize();
+        return chart;
+      } catch(e) {
+        console.error('Chart error on ' + id, e);
+        const parent = canvas.parentElement;
+        parent.innerHTML = '<div class="fallback-msg">⚠️ Chart unavailable</div>';
+        return null;
+      }
+    }
 
-  new Chart(document.getElementById('riskRadar'), {
-    type: 'radar',
-    data: {
-      labels: ['SSH','Firewall','Users','Files','MAC/SELinux','Updates'],
-      datasets: [{
-        label: 'Risk level',
-        data: [
-          metrics.ssh_root === 'yes' ? 100 : 5,
-          metrics.ufw_status === 'inactive' ? 80 : 10,
-          metrics.users_no_pass * 20 + metrics.root_users * 5,
-          metrics.world_writable * 2 + metrics.suid_files,
-          (metrics.selinux !== 'enabled' && metrics.apparmor !== 'loaded') ? 80 : 15,
-          metrics.pending_updates * 5
-        ],
-        fill: true,
-        backgroundColor: 'rgba(239,68,68,.15)',
-        borderColor: '#ef4444',
-        pointBackgroundColor: '#ef4444',
-        pointRadius: 4
-      }]
-    },
-    options: { ...defaults, scales: { r: { ticks: { color: C.text, backdropColor: 'transparent', stepSize: 25 }, grid: { color: '#334155' }, pointLabels: { color: C.text, font: { size: 11 } }, min: 0, max: 100 } } }
-  });
+    // Wait for containers to have size (max 10 attempts)
+    let attempts = 0;
+    const maxAttempts = 10;
+    function tryDraw() {
+      attempts++;
+      const containers = document.querySelectorAll('.chart-wrap');
+      let allHaveSize = true;
+      containers.forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) allHaveSize = false;
+      });
+      if (!allHaveSize && attempts < maxAttempts) {
+        requestAnimationFrame(tryDraw);
+        return;
+      }
 
-  const critCount = (metrics.ssh_root === 'yes' ? 1 : 0) + (metrics.ufw_status === 'inactive' ? 1 : 0) + (metrics.users_no_pass > 0 ? 1 : 0);
-  const highCount = (metrics.world_writable > 0 ? 1 : 0) + (metrics.failed_logins > 50 ? 1 : 0);
-  const medCount = (metrics.suid_files > 30 ? 1 : 0) + (metrics.pending_updates > 0 ? 1 : 0);
-  const lowCount = Math.max(1, 8 - critCount - highCount - medCount);
-  new Chart(document.getElementById('severityChart'), {
-    type: 'doughnut',
-    data: {
-      labels: ['Critical','High','Medium','Low / Info'],
-      datasets: [{ data: [critCount, highCount, medCount, lowCount], backgroundColor: [C.red, C.yellow, C.purple, C.green], borderWidth: 0, hoverOffset: 4 }]
-    },
-    options: { ...defaults, cutout: '60%' }
-  });
+      const memPct = (metrics.mem_total > 0) ? Math.round((metrics.mem_used || 0) / metrics.mem_total * 100) : 0;
+      const cpuLoad = parseFloat(metrics.cpu_load) || 0;
+
+      safeChart('resourceChart', {
+        type: 'doughnut',
+        data: {
+          labels: ['CPU load (×10)', 'Mem used %', 'Disk used %', 'Idle'],
+          datasets: [{
+            data: [Math.min(cpuLoad*10, 100), memPct, metrics.disk_usage || 0, Math.max(0, 100 - memPct)],
+            backgroundColor: [C.purple, C.blue, C.cyan, C.bg3],
+            borderWidth: 0, hoverOffset: 4
+          }]
+        },
+        options: { ...defaults, cutout: '65%' }
+      });
+
+      safeChart('fileRiskChart', {
+        type: 'bar',
+        data: {
+          labels: ['SUID files', 'World-writable', 'Empty-pwd users', 'Root accounts', 'Failed logins ÷10'],
+          datasets: [{
+            label: 'Count',
+            data: [metrics.suid_files || 0, metrics.world_writable || 0, metrics.users_no_pass || 0, metrics.root_users || 0, Math.round((metrics.failed_logins || 0)/10)],
+            backgroundColor: [C.purple, C.red, C.red, C.yellow, C.yellow],
+            borderRadius: 6, borderWidth: 0
+          }]
+        },
+        options: { ...defaults, indexAxis: 'y', scales: { x: { ticks: { color: C.text }, grid: { color: '#334155' } }, y: { ticks: { color: C.text }, grid: { display: false } } } }
+      });
+
+      safeChart('riskRadar', {
+        type: 'radar',
+        data: {
+          labels: ['SSH','Firewall','Users','Files','MAC/SELinux','Updates'],
+          datasets: [{
+            label: 'Risk level',
+            data: [
+              (metrics.ssh_root === 'yes') ? 100 : 5,
+              (metrics.ufw_status === 'inactive') ? 80 : 10,
+              (metrics.users_no_pass || 0) * 20 + (metrics.root_users || 0) * 5,
+              (metrics.world_writable || 0) * 2 + (metrics.suid_files || 0),
+              (metrics.selinux !== 'enabled' && metrics.apparmor !== 'loaded') ? 80 : 15,
+              (metrics.pending_updates || 0) * 5
+            ],
+            fill: true,
+            backgroundColor: 'rgba(239,68,68,.15)',
+            borderColor: '#ef4444',
+            pointBackgroundColor: '#ef4444',
+            pointRadius: 4
+          }]
+        },
+        options: { ...defaults, scales: { r: { ticks: { color: C.text, backdropColor: 'transparent', stepSize: 25 }, grid: { color: '#334155' }, pointLabels: { color: C.text, font: { size: 11 } }, min: 0, max: 100 } } }
+      });
+
+      const crit = ((metrics.ssh_root === 'yes') ? 1 : 0) + ((metrics.ufw_status === 'inactive') ? 1 : 0) + ((metrics.users_no_pass || 0) > 0 ? 1 : 0);
+      const high = ((metrics.world_writable || 0) > 0 ? 1 : 0) + ((metrics.failed_logins || 0) > 50 ? 1 : 0);
+      const med = ((metrics.suid_files || 0) > 30 ? 1 : 0) + ((metrics.pending_updates || 0) > 0 ? 1 : 0);
+      const low = Math.max(1, 8 - crit - high - med);
+      safeChart('severityChart', {
+        type: 'doughnut',
+        data: {
+          labels: ['Critical','High','Medium','Low / Info'],
+          datasets: [{ data: [crit, high, med, low], backgroundColor: [C.red, C.yellow, C.purple, C.green], borderWidth: 0, hoverOffset: 4 }]
+        },
+        options: { ...defaults, cutout: '60%' }
+      });
+
+      // Anomaly gauge
+      const anomalyScore = auditData.anomaly_score || 0.5;
+      const scorePercent = Math.round(anomalyScore * 100);
+      const isAnomaly = auditData.is_anomaly || false;
+      const anomalyCanvas = document.getElementById('anomalyChart');
+      if (anomalyCanvas) {
+        const rect = anomalyCanvas.parentElement.getBoundingClientRect();
+        const w = rect.width || 200;
+        const h = rect.height || 120;
+        anomalyCanvas.width = w;
+        anomalyCanvas.height = h;
+        anomalyCanvas.style.width = w + 'px';
+        anomalyCanvas.style.height = h + 'px';
+        try {
+          new Chart(anomalyCanvas, {
+            type: 'doughnut',
+            data: {
+              labels: ['Anomaly Score', 'Remaining'],
+              datasets: [{ data: [scorePercent, 100 - scorePercent], backgroundColor: [isAnomaly ? '#ef4444' : '#22c55e', '#334155'], borderWidth: 0, hoverOffset: 4 }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              cutout: '75%',
+              plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => ctx.parsed + '%' } } }
+            }
+          });
+        } catch(e) {
+          console.error('Anomaly chart error', e);
+          anomalyCanvas.parentElement.innerHTML = '<div class="fallback-msg">⚠️ Anomaly chart unavailable</div>';
+        }
+      }
+    }
+
+    tryDraw();
+
+  } catch(e) {
+    console.error('initCharts error:', e);
+    document.querySelectorAll('.chart-wrap').forEach(el => {
+      el.innerHTML = '<div class="fallback-msg">⚠️ Charts could not be rendered</div>';
+    });
+  }
 }
 
 render();
@@ -1788,6 +2095,7 @@ main() {
     fi
 
     auto_install_audit_tools
+    ensure_chartjs_cached
     choose_output_format
     echo -e "${BLUE}[*] Initialising audit...${NC}"
     initialize_output
