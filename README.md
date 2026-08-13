@@ -227,7 +227,5 @@ Contributions, bug reports, and feature requests are welcome!
 
 <div align="center">
 
-**If this tool helped you, please consider giving it a ⭐ on GitHub!**
-
 *Linux Audit Tool v5.0 — For internal use only. Always audit responsibly.*
 </div>
