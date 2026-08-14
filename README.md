@@ -228,4 +228,5 @@ Contributions, bug reports, and feature requests are welcome!
 <div align="center">
 
 *Linux Audit Tool v5.0 — For internal use only. Always audit responsibly.*
+
 </div>
